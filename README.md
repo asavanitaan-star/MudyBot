@@ -1,22 +1,31 @@
 # MudyBot — LuckyCondo LINE Bot
 
-แชทบอท LINE สำหรับคอนโด LuckyCondo ตอบลูกค้าเป็นภาษาไทยอัตโนมัติด้วย AI (Qwen3 14B ผ่าน Ollama แบบรันบนเครื่องเอง) พร้อมระบบเตือนชำระค่าเช่าในกลุ่มผู้เช่า
+แชทบอท LINE สำหรับคอนโด LuckyCondo ตอบลูกค้าเป็นภาษาไทยอัตโนมัติด้วย AI พร้อมระบบเตือนชำระค่าเช่าในกลุ่มผู้เช่า
 
 ## ความสามารถ
 
-- 💬 ตอบคำถามลูกค้าเป็นภาษาไทยด้วย Qwen3 14B (รันในเครื่อง ฟรี ข้อมูลไม่ออกนอกเครื่อง)
+- 💬 ตอบคำถามลูกค้าเป็นภาษาไทยด้วย AI (รองรับทั้ง Gemini และ Ollama)
+- 🕐 รับรู้วันเวลาปัจจุบัน (เวลาไทย) สามารถตอบคำถามเรื่องวันที่/เวลาได้ถูกต้อง
 - 🧠 จำบทสนทนาต่อเนื่องรายบุคคล (บันทึกลงไฟล์ รอดการรีสตาร์ท)
-- 🔘 Quick Reply + Rich Menu เมนูปุ่ม
+- 🔘 Quick Reply เมนูปุ่มลัด
 - 👋 ทักทายอัตโนมัติเมื่อเพิ่มเพื่อน / ถูกเชิญเข้ากลุ่ม
 - 👥 ทำงานในกลุ่มได้ (ตอบเฉพาะเมื่อเรียก "ลัคกี้")
 - 💸 เตือนชำระค่าเช่าอัตโนมัติ ตั้งค่าผ่านคำสั่งในแชท (เตือนล่วงหน้าได้หลายรอบ)
+- 🛠️ ตั้งค่าเตือนด้วยภาษาธรรมชาติผ่าน AI (Function Calling)
+
+## AI Provider ที่รองรับ
+
+| Provider | วิธีใช้ | ข้อดี |
+|----------|---------|-------|
+| **Gemini** (แนะนำ) | `LLM_PROVIDER=gemini` | ฟรี ใช้งานบน cloud ไม่ต้องติดตั้งเพิ่ม |
+| **Ollama** | `LLM_PROVIDER=ollama` | ฟรี ข้อมูลไม่ออกนอกเครื่อง แต่ต้องเปิดคอมไว้ |
 
 ## ความต้องการของระบบ
 
 - [Node.js](https://nodejs.org/) 18+
-- [Ollama](https://ollama.com/) + โมเดล `qwen3:14b` (`ollama pull qwen3:14b`)
 - LINE Official Account + Messaging API channel
 - ngrok (หรือ tunnel อื่น) สำหรับเปิด webhook สู่อินเทอร์เน็ต
+- Gemini API Key (ฟรี): [aistudio.google.com](https://aistudio.google.com) — หรือ Ollama ถ้ารันในเครื่อง
 
 ## ติดตั้ง
 
@@ -26,11 +35,19 @@ npm install
 
 สร้างไฟล์ `.env` (ดูตัวอย่างจาก `.env.example`):
 
-```
+```env
 LINE_CHANNEL_ACCESS_TOKEN=...
 LINE_CHANNEL_SECRET=...
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:14b
+
+# เลือก AI provider: gemini หรือ ollama
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash
+
+# (ถ้าใช้ Ollama)
+# OLLAMA_URL=http://localhost:11434
+# OLLAMA_MODEL=qwen3:14b
+
 PORT=3000
 ```
 
@@ -38,7 +55,7 @@ PORT=3000
 
 ```bash
 npm start
-# แล้วเปิด tunnel: ngrok http 3000
+# แล้วเปิด tunnel: ngrok http --url=<your-static-url> 3000
 # นำ URL ไปตั้งเป็น Webhook URL ใน LINE: https://<your-url>/webhook
 ```
 
@@ -58,6 +75,18 @@ npm start
 | `เตือนเดี๋ยวนี้` | ทดสอบส่งทันที |
 | `คำสั่ง` | ดูวิธีใช้ทั้งหมด |
 
+นอกจากนี้ยังสามารถพูดภาษาธรรมชาติกับบอทได้เลย เช่น "เตือนค่าเช่าทุกวันที่ 5 ตอน 9 โมงเช้า ล่วงหน้า 3 วัน"
+
 ## การปรับแต่ง
 
 แก้ข้อมูลคอนโด ราคา ช่องทางติดต่อ และข้อความต่าง ๆ ได้ในไฟล์ [`info.js`](info.js)
+
+## โครงสร้างไฟล์
+
+```
+├── bot.js          # โค้ดหลัก (webhook, AI, reminder, คำสั่ง)
+├── info.js         # ข้อมูลคอนโด system prompt และข้อความต่างๆ
+├── start.bat       # เปิดบอท + ngrok พร้อมกัน (Windows)
+├── .env.example    # ตัวอย่างการตั้งค่า
+└── package.json
+```
