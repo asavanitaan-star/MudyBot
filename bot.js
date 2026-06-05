@@ -25,18 +25,10 @@ const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b';
 const PORT = process.env.PORT || 3000;
 
-// เลือกผู้ให้บริการ AI: 'ollama' (ในเครื่อง) | 'claude' (คลาวด์) | 'gemini' (คลาวด์ ฟรี)
+// เลือกผู้ให้บริการ AI: 'ollama' (ในเครื่อง ฟรี) | 'gemini' (คลาวด์ ฟรี)
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase();
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-// สร้าง Claude client เฉพาะเมื่อเลือกใช้ claude
-let anthropic = null;
-if (LLM_PROVIDER === 'claude') {
-  const Anthropic = require('@anthropic-ai/sdk');
-  anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-}
 
 // จำนวนข้อความย้อนหลัง (user+bot) ที่เก็บต่อ 1 คน
 const MAX_HISTORY = 10;
@@ -572,51 +564,6 @@ async function askOllama(chatId, userText) {
   return text;
 }
 
-// ---------- Claude (Anthropic) ----------
-// แปลง tool definitions เดิม (รูปแบบ Ollama) ให้เป็นรูปแบบ Claude
-const CLAUDE_REMINDER_TOOLS = REMINDER_TOOLS.map((t) => ({
-  name: t.function.name,
-  description: t.function.description,
-  input_schema: t.function.parameters,
-}));
-
-async function askClaude(chatId, userText) {
-  const history = getHistory(chatId);
-  const reminderRelated = /เตือน|ค่าเช่า|ชำระ|จ่ายค่า/.test(userText);
-
-  const req = {
-    model: CLAUDE_MODEL,
-    max_tokens: 1024,
-    // prompt caching: ระบบ prompt คงที่ -> แคชไว้ลดต้นทุน
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [...history, { role: 'user', content: userText }],
-  };
-  if (reminderRelated) req.tools = CLAUDE_REMINDER_TOOLS;
-
-  const resp = await anthropic.messages.create(req);
-
-  // ถ้า Claude เรียก tool -> ตั้งค่าเตือนจริง แล้วตอบยืนยัน
-  const toolUses = resp.content.filter((b) => b.type === 'tool_use');
-  if (toolUses.length) {
-    const confirm = applyReminderTools(
-      chatId,
-      toolUses.map((b) => ({ function: { name: b.name, arguments: b.input } }))
-    );
-    if (confirm) {
-      pushHistory(chatId, 'user', userText);
-      pushHistory(chatId, 'assistant', confirm);
-      return confirm;
-    }
-  }
-
-  let text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
-  text = text || 'ขออภัยค่ะ ไม่สามารถประมวลผลคำตอบได้ กรุณาลองใหม่นะคะ';
-
-  pushHistory(chatId, 'user', userText);
-  pushHistory(chatId, 'assistant', text);
-  return text;
-}
-
 // ---------- Gemini (Google) ----------
 // แปลง schema เป็นรูปแบบ Gemini (type ต้องเป็นตัวพิมพ์ใหญ่ เช่น OBJECT/STRING/INTEGER)
 function toGeminiSchema(s) {
@@ -688,7 +635,6 @@ async function askGemini(chatId, userText) {
 
 // ---------- Dispatcher: เลือก provider ตาม LLM_PROVIDER ----------
 async function askAI(chatId, userText) {
-  if (LLM_PROVIDER === 'claude') return askClaude(chatId, userText);
   if (LLM_PROVIDER === 'gemini') return askGemini(chatId, userText);
   return askOllama(chatId, userText);
 }
@@ -703,9 +649,7 @@ app.listen(PORT, () => {
   const mm = String(r.minute).padStart(2, '0');
   const adv = r.advanceDays.join(',');
   console.log(`🚀 LuckyCondo Bot listening on port ${PORT}`);
-  if (LLM_PROVIDER === 'claude') {
-    console.log(`   AI: Claude (${CLAUDE_MODEL})`);
-  } else if (LLM_PROVIDER === 'gemini') {
+  if (LLM_PROVIDER === 'gemini') {
     console.log(`   AI: Gemini (${GEMINI_MODEL})`);
   } else {
     console.log(`   AI: Ollama ${OLLAMA_URL}  Model: ${OLLAMA_MODEL}`);
