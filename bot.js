@@ -524,6 +524,15 @@ function applyReminderTools(chatId, toolCalls) {
   return null;
 }
 
+// ---------- วันเวลาปัจจุบัน (เวลาไทย UTC+7) ----------
+function getCurrentDatetimePrompt() {
+  const now = new Date(Date.now() + 7 * 3600 * 1000); // UTC+7
+  const days = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  const dayName = days[now.getUTCDay()];
+  const pad = (n) => String(n).padStart(2, '0');
+  return `\n\n[ข้อมูลระบบ] วันเวลาปัจจุบัน (เวลาไทย): วัน${dayName}ที่ ${now.getUTCDate()}/${now.getUTCMonth() + 1}/${now.getUTCFullYear() + 543} เวลา ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())} น.`;
+}
+
 // ---------- Ollama (Qwen3) ----------
 async function askOllama(chatId, userText) {
   const history = getHistory(chatId);
@@ -533,7 +542,7 @@ async function askOllama(chatId, userText) {
   const payload = {
     model: OLLAMA_MODEL,
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: SYSTEM_PROMPT + getCurrentDatetimePrompt() },
       ...history,
       { role: 'user', content: userText },
     ],
@@ -601,7 +610,7 @@ async function askGemini(chatId, userText) {
   ];
 
   const body = {
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT + getCurrentDatetimePrompt() }] },
     contents,
     generationConfig: { temperature: 0.7 },
   };

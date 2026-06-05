@@ -7,13 +7,13 @@ echo ============================================
 echo.
 
 REM ---- 1) เปิดบอท (Express + Ollama) ในหน้าต่างของตัวเอง ----
-start "LuckyCondo Bot" cmd /k "cd /d C:\luckycondo-bot && npm start"
+start "LuckyCondo Bot" cmd /k "cd /d C:\luckycondo-bot && C:\progra~1\nodejs\npm.cmd start"
 
 REM ---- รอให้บอทจับพอร์ต 3000 ก่อน ----
 timeout /t 4 /nobreak >nul
 
 REM ---- 2) เปิด ngrok ล็อกโดเมนถาวร ในหน้าต่างของตัวเอง ----
-start "ngrok tunnel" cmd /k "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe http --url=https://relish-blasphemy-atop.ngrok-free.dev 3000"
+start "ngrok tunnel" cmd /k "C:\luckycondo-bot\ngrok.exe http --url=https://relish-blasphemy-atop.ngrok-free.dev 3000"
 
 echo.
 echo เปิด 2 หน้าต่างแล้ว (บอท + ngrok) - อย่าปิดทั้งสองหน้าต่างนี้
