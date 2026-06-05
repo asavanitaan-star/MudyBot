@@ -2,7 +2,7 @@
 //  LuckyCondo LINE Bot  —  Webhook + Ollama (Qwen3 14B)
 //  มีความจำบทสนทนา + Quick Reply + ต้อนรับเพื่อนใหม่
 // ============================================================
-require('dotenv').config();
+require('dotenv').config({ override: true }); // ให้ค่าใน .env ชนะ env เดิมของระบบเสมอ
 
 const express = require('express');
 const line = require('@line/bot-sdk');
@@ -24,6 +24,19 @@ const config = {
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b';
 const PORT = process.env.PORT || 3000;
+
+// เลือกผู้ให้บริการ AI: 'ollama' (ในเครื่อง) | 'claude' (คลาวด์) | 'gemini' (คลาวด์ ฟรี)
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase();
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// สร้าง Claude client เฉพาะเมื่อเลือกใช้ claude
+let anthropic = null;
+if (LLM_PROVIDER === 'claude') {
+  const Anthropic = require('@anthropic-ai/sdk');
+  anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
 
 // จำนวนข้อความย้อนหลัง (user+bot) ที่เก็บต่อ 1 คน
 const MAX_HISTORY = 10;
@@ -168,12 +181,27 @@ function setReminderConfig(chatId, cfg) {
   saveReminders();
 }
 
-// ประกอบข้อความเตือน (เติมหัวข้อ ล่วงหน้า/ครบกำหนด ให้อัตโนมัติ)
+// ประกอบข้อความเตือน (เติมหัวข้อ ล่วงหน้า/ครบกำหนด + จำนวนเงิน ให้อัตโนมัติ)
 function buildReminderText(cfg, daysBefore) {
   const head = daysBefore === 0
     ? `🔔 วันนี้ครบกำหนดชำระค่าเช่า (วันที่ ${cfg.dueDay} ของเดือน)`
     : `⏰ แจ้งเตือนล่วงหน้า: อีก ${daysBefore} วันจะครบกำหนดชำระค่าเช่า (วันที่ ${cfg.dueDay})`;
-  return `${head}\n\n${cfg.message}`;
+  const amountLine = cfg.amount ? `\n💰 ยอดชำระ: ${cfg.amount.toLocaleString('th-TH')} บาท` : '';
+  return `${head}${amountLine}\n\n${cfg.message}`;
+}
+
+// สรุปการตั้งค่าเตือนเป็นข้อความ (ใช้ทั้งคำสั่ง "ดูการตั้งค่า" และการยืนยันหลังตั้งค่า)
+function formatReminderConfig(c) {
+  const hh = String(c.hour).padStart(2, '0');
+  const mm = String(c.minute).padStart(2, '0');
+  const adv = c.advanceDays.length ? c.advanceDays.join(', ') + ' วัน' : 'ไม่มี (เฉพาะวันครบกำหนด)';
+  const amt = c.amount ? `${c.amount.toLocaleString('th-TH')} บาท` : 'ยังไม่ระบุ';
+  return `⚙️ การตั้งค่าเตือนค่าเช่าของแชทนี้
+- สถานะ: ${c.enabled ? 'เปิด ✅' : 'ปิด ⛔'}
+- วันครบกำหนด: วันที่ ${c.dueDay} ของเดือน
+- ยอดค่าเช่า: ${amt}
+- เตือนล่วงหน้า: ${adv}
+- เวลาเตือน: ${hh}:${mm} น.`;
 }
 
 // คำนวณรอบเตือนของเดือนที่ระบุ -> [{ date, daysBefore }]
@@ -244,17 +272,7 @@ function handleReminderCommand(text, chatId) {
 
   // ดูการตั้งค่า
   if (/^ดู.*(ตั้งค่า)?.*เตือน/.test(t)) {
-    const c = getReminderConfig(chatId);
-    const hh = String(c.hour).padStart(2, '0');
-    const mm = String(c.minute).padStart(2, '0');
-    const adv = c.advanceDays.length ? c.advanceDays.join(', ') + ' วัน' : 'ไม่มี';
-    return `⚙️ การตั้งค่าเตือนค่าเช่าของกลุ่มนี้
-- สถานะ: ${c.enabled ? 'เปิด ✅' : 'ปิด ⛔'}
-- วันครบกำหนด: วันที่ ${c.dueDay} ของเดือน
-- เตือนล่วงหน้า: ${adv}
-- เวลาเตือน: ${hh}:${mm} น.
-
-พิมพ์ "ลัคกี้ คำสั่ง" เพื่อดูวิธีแก้ไขค่ะ`;
+    return formatReminderConfig(getReminderConfig(chatId)) + '\n\nพิมพ์ "ลัคกี้ คำสั่ง" เพื่อดูวิธีแก้ไขค่ะ';
   }
 
   // เตือนเดี๋ยวนี้ / ทดสอบ
@@ -422,9 +440,9 @@ async function handleEvent(event) {
 
   let replyText;
   try {
-    replyText = await askOllama(convKey, promptText);
+    replyText = await askAI(convKey, promptText);
   } catch (err) {
-    console.error('Ollama error:', err.message);
+    console.error('AI error:', err.message);
     replyText = 'ขออภัยค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง หรือติดต่อเจ้าหน้าที่โดยตรงนะคะ 🙏';
   }
 
@@ -440,40 +458,239 @@ async function handleEvent(event) {
   });
 }
 
-// ---------- Ollama (Qwen3 14B) ----------
-async function askOllama(userId, userText) {
-  const history = getHistory(userId);
-
-  const response = await axios.post(
-    `${OLLAMA_URL}/api/chat`,
-    {
-      model: OLLAMA_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...history, // บริบทบทสนทนาก่อนหน้า
-        { role: 'user', content: userText },
-      ],
-      stream: false,
-      think: false, // ปิดโหมด reasoning ของ Qwen3 เพื่อให้ตอบเร็วและสะอาด
-      options: {
-        temperature: 0.7,
-        num_ctx: 8192,
+// ---------- Tool: ให้ AI เข้าใจภาษาธรรมชาติแล้วตั้งค่าเตือนค่าเช่า ----------
+const REMINDER_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'set_rent_reminder',
+      description: 'ตั้งค่าหรือแก้ไขการแจ้งเตือนชำระค่าเช่าของห้องแชทนี้ เรียกเมื่อผู้ใช้ต้องการตั้ง/เปิด/ปิด/เปลี่ยนแปลงการเตือนค่าเช่า เช่น "เตือนค่าเช่าทุกวันที่ 5", "ตั้งเตือนล่วงหน้า 3 วัน", "ปิดการเตือน"',
+      parameters: {
+        type: 'object',
+        properties: {
+          dueDay: { type: 'integer', description: 'วันครบกำหนดชำระของเดือน (1-28)' },
+          hour: { type: 'integer', description: 'เวลาเตือน ชั่วโมงแบบ 24 ชม. (0-23) เช่น แปดโมงเช้า=8, เก้าโมง=9, บ่ายสอง=14' },
+          minute: { type: 'integer', description: 'เวลาเตือน นาที (0-59)' },
+          advanceDays: { type: 'array', items: { type: 'integer' }, description: 'จำนวนวันที่เตือนล่วงหน้าก่อนครบกำหนด เช่น [3,1] หมายถึงเตือนก่อน 3 วันและ 1 วัน' },
+          amount: { type: 'integer', description: 'จำนวนเงินค่าเช่าเป็นบาท (ถ้าผู้ใช้ระบุ)' },
+          enabled: { type: 'boolean', description: 'true=เปิดการเตือน, false=ปิดการเตือน' },
+        },
       },
     },
-    { timeout: 120000 } // 2 นาที เผื่อโมเดลตอบช้า
-  );
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'show_rent_reminder',
+      description: 'แสดงการตั้งค่าการเตือนค่าเช่าปัจจุบันของห้องแชทนี้ เรียกเมื่อผู้ใช้ถามว่าตั้งค่าเตือนไว้อย่างไร',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+];
 
-  let text = response.data?.message?.content || '';
+// ดำเนินการตาม tool ที่โมเดลเรียก -> คืนข้อความยืนยัน (หรือ null ถ้าไม่มี tool ที่รู้จัก)
+function applyReminderTools(chatId, toolCalls) {
+  for (const call of toolCalls) {
+    const fn = call.function?.name;
+    let args = call.function?.arguments || {};
+    if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
 
-  // กันเหนียว: ลบ <think>...</think> ออก เผื่อโมเดลยัง reasoning มา
-  text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    if (fn === 'show_rent_reminder') {
+      return formatReminderConfig(getReminderConfig(chatId));
+    }
+
+    if (fn === 'set_rent_reminder') {
+      const c = getReminderConfig(chatId);
+      const changes = [];
+      if (Number.isInteger(args.dueDay) && args.dueDay >= 1 && args.dueDay <= 28) {
+        c.dueDay = args.dueDay; changes.push(`วันครบกำหนด = วันที่ ${args.dueDay}`);
+      }
+      if (Number.isInteger(args.hour) && args.hour >= 0 && args.hour <= 23) {
+        c.hour = args.hour;
+        if (Number.isInteger(args.minute) && args.minute >= 0 && args.minute <= 59) c.minute = args.minute;
+        else c.minute = 0;
+        changes.push(`เวลา = ${String(c.hour).padStart(2,'0')}:${String(c.minute).padStart(2,'0')} น.`);
+      }
+      if (Array.isArray(args.advanceDays)) {
+        const adv = [...new Set(args.advanceDays.map((x) => parseInt(x, 10))
+          .filter((x) => Number.isInteger(x) && x > 0 && x <= 27))].sort((a, b) => b - a);
+        c.advanceDays = adv;
+        changes.push(`เตือนล่วงหน้า = ${adv.length ? adv.join(', ') + ' วัน' : 'ไม่มี'}`);
+      }
+      if (Number.isInteger(args.amount) && args.amount > 0) {
+        c.amount = args.amount; changes.push(`ยอดค่าเช่า = ${args.amount.toLocaleString('th-TH')} บาท`);
+      }
+      if (typeof args.enabled === 'boolean') {
+        c.enabled = args.enabled; changes.push(args.enabled ? 'เปิดการเตือน' : 'ปิดการเตือน');
+      }
+      if (changes.length === 0) return null; // โมเดลเรียกแต่ไม่มีค่าที่ใช้ได้
+      c.enabled = c.enabled !== false; // ถ้าตั้งค่าใหม่ ให้ถือว่าเปิด (เว้นแต่สั่งปิดชัดเจน)
+      setReminderConfig(chatId, c);
+      return `✅ ตั้งค่าเตือนค่าเช่าเรียบร้อยค่ะ (${changes.join(', ')})\n\n${formatReminderConfig(c)}`;
+    }
+  }
+  return null;
+}
+
+// ---------- Ollama (Qwen3) ----------
+async function askOllama(chatId, userText) {
+  const history = getHistory(chatId);
+  // แนบ tool ตั้งเตือนเฉพาะเมื่อข้อความเกี่ยวกับการเตือน/ค่าเช่า (กัน tool ลั่นกับคำถามทั่วไป)
+  const reminderRelated = /เตือน|ค่าเช่า|ชำระ|จ่ายค่า/.test(userText);
+
+  const payload = {
+    model: OLLAMA_MODEL,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...history,
+      { role: 'user', content: userText },
+    ],
+    stream: false,
+    think: false,
+    options: { temperature: 0.7, num_ctx: 8192 },
+  };
+  if (reminderRelated) payload.tools = REMINDER_TOOLS;
+
+  const response = await axios.post(`${OLLAMA_URL}/api/chat`, payload, { timeout: 120000 });
+  const msg = response.data?.message || {};
+
+  // ถ้าโมเดลเรียก tool -> ตั้งค่าเตือนจริง แล้วตอบยืนยัน
+  if (msg.tool_calls?.length) {
+    const confirm = applyReminderTools(chatId, msg.tool_calls);
+    if (confirm) {
+      pushHistory(chatId, 'user', userText);
+      pushHistory(chatId, 'assistant', confirm);
+      return confirm;
+    }
+  }
+
+  let text = (msg.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
   text = text || 'ขออภัยค่ะ ไม่สามารถประมวลผลคำตอบได้ กรุณาลองใหม่นะคะ';
 
-  // บันทึกบทสนทนาลงความจำ
-  pushHistory(userId, 'user', userText);
-  pushHistory(userId, 'assistant', text);
-
+  pushHistory(chatId, 'user', userText);
+  pushHistory(chatId, 'assistant', text);
   return text;
+}
+
+// ---------- Claude (Anthropic) ----------
+// แปลง tool definitions เดิม (รูปแบบ Ollama) ให้เป็นรูปแบบ Claude
+const CLAUDE_REMINDER_TOOLS = REMINDER_TOOLS.map((t) => ({
+  name: t.function.name,
+  description: t.function.description,
+  input_schema: t.function.parameters,
+}));
+
+async function askClaude(chatId, userText) {
+  const history = getHistory(chatId);
+  const reminderRelated = /เตือน|ค่าเช่า|ชำระ|จ่ายค่า/.test(userText);
+
+  const req = {
+    model: CLAUDE_MODEL,
+    max_tokens: 1024,
+    // prompt caching: ระบบ prompt คงที่ -> แคชไว้ลดต้นทุน
+    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [...history, { role: 'user', content: userText }],
+  };
+  if (reminderRelated) req.tools = CLAUDE_REMINDER_TOOLS;
+
+  const resp = await anthropic.messages.create(req);
+
+  // ถ้า Claude เรียก tool -> ตั้งค่าเตือนจริง แล้วตอบยืนยัน
+  const toolUses = resp.content.filter((b) => b.type === 'tool_use');
+  if (toolUses.length) {
+    const confirm = applyReminderTools(
+      chatId,
+      toolUses.map((b) => ({ function: { name: b.name, arguments: b.input } }))
+    );
+    if (confirm) {
+      pushHistory(chatId, 'user', userText);
+      pushHistory(chatId, 'assistant', confirm);
+      return confirm;
+    }
+  }
+
+  let text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+  text = text || 'ขออภัยค่ะ ไม่สามารถประมวลผลคำตอบได้ กรุณาลองใหม่นะคะ';
+
+  pushHistory(chatId, 'user', userText);
+  pushHistory(chatId, 'assistant', text);
+  return text;
+}
+
+// ---------- Gemini (Google) ----------
+// แปลง schema เป็นรูปแบบ Gemini (type ต้องเป็นตัวพิมพ์ใหญ่ เช่น OBJECT/STRING/INTEGER)
+function toGeminiSchema(s) {
+  if (Array.isArray(s)) return s.map(toGeminiSchema);
+  if (s && typeof s === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(s)) {
+      out[k] = k === 'type' && typeof v === 'string' ? v.toUpperCase() : toGeminiSchema(v);
+    }
+    return out;
+  }
+  return s;
+}
+// สร้าง function declarations สำหรับ Gemini จาก REMINDER_TOOLS
+const GEMINI_REMINDER_TOOLS = [{
+  function_declarations: REMINDER_TOOLS.map((t) => {
+    const decl = { name: t.function.name, description: t.function.description };
+    const props = t.function.parameters?.properties || {};
+    if (Object.keys(props).length > 0) decl.parameters = toGeminiSchema(t.function.parameters);
+    return decl;
+  }),
+}];
+
+async function askGemini(chatId, userText) {
+  const history = getHistory(chatId);
+  const reminderRelated = /เตือน|ค่าเช่า|ชำระ|จ่ายค่า/.test(userText);
+
+  // Gemini ใช้ role 'user' กับ 'model' (แปลง assistant -> model)
+  const contents = [
+    ...history.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    })),
+    { role: 'user', parts: [{ text: userText }] },
+  ];
+
+  const body = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: { temperature: 0.7 },
+  };
+  if (reminderRelated) body.tools = GEMINI_REMINDER_TOOLS;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const resp = await axios.post(url, body, { timeout: 120000 });
+  const parts = resp.data?.candidates?.[0]?.content?.parts || [];
+
+  // ถ้า Gemini เรียก tool -> ตั้งค่าเตือนจริง แล้วตอบยืนยัน
+  const fcs = parts.filter((p) => p.functionCall);
+  if (fcs.length) {
+    const confirm = applyReminderTools(
+      chatId,
+      fcs.map((p) => ({ function: { name: p.functionCall.name, arguments: p.functionCall.args || {} } }))
+    );
+    if (confirm) {
+      pushHistory(chatId, 'user', userText);
+      pushHistory(chatId, 'assistant', confirm);
+      return confirm;
+    }
+  }
+
+  let text = parts.filter((p) => p.text).map((p) => p.text).join('').trim();
+  text = text || 'ขออภัยค่ะ ไม่สามารถประมวลผลคำตอบได้ กรุณาลองใหม่นะคะ';
+
+  pushHistory(chatId, 'user', userText);
+  pushHistory(chatId, 'assistant', text);
+  return text;
+}
+
+// ---------- Dispatcher: เลือก provider ตาม LLM_PROVIDER ----------
+async function askAI(chatId, userText) {
+  if (LLM_PROVIDER === 'claude') return askClaude(chatId, userText);
+  if (LLM_PROVIDER === 'gemini') return askGemini(chatId, userText);
+  return askOllama(chatId, userText);
 }
 
 // ---------- Start ----------
@@ -486,7 +703,13 @@ app.listen(PORT, () => {
   const mm = String(r.minute).padStart(2, '0');
   const adv = r.advanceDays.join(',');
   console.log(`🚀 LuckyCondo Bot listening on port ${PORT}`);
-  console.log(`   Ollama: ${OLLAMA_URL}  Model: ${OLLAMA_MODEL}`);
+  if (LLM_PROVIDER === 'claude') {
+    console.log(`   AI: Claude (${CLAUDE_MODEL})`);
+  } else if (LLM_PROVIDER === 'gemini') {
+    console.log(`   AI: Gemini (${GEMINI_MODEL})`);
+  } else {
+    console.log(`   AI: Ollama ${OLLAMA_URL}  Model: ${OLLAMA_MODEL}`);
+  }
   console.log(`   ความจำ: ${MAX_HISTORY} ข้อความ/คน, ลบอัตโนมัติหลังเงียบ ${HISTORY_TTL_HOURS} ชม. (บันทึกลงไฟล์)`);
   console.log(`   เตือนค่าเช่า (ค่าตั้งต้น): ครบกำหนดวันที่ ${r.dueDay}, ล่วงหน้า ${adv} วัน, เวลา ${hh}:${mm} น. (${groups.size} กลุ่ม)`);
 });
