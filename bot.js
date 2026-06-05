@@ -453,6 +453,102 @@ function formatPaymentSummary(key) {
   return `📊 สรุปการชำระเงิน ${label}\n\nชำระแล้ว (${paid.length}/${allRooms.length}):\n${paidRows || '  ยังไม่มี'}\n\nยังไม่ชำระ (${unpaid.length}):\n${unpaidRows || '  ไม่มี'}${outLine}`;
 }
 
+// ─── Documents (เอกสาร/รูปต่อกลุ่ม) ─────────────────────────
+const MEDIA_DIR = path.join(__dirname, 'media');
+const DOCS_FILE = path.join(__dirname, 'docs.json');
+const docs = new Map();       // groupId -> { contract:[], movein:[], moveout:[] }
+const pendingDoc = new Map();  // groupId -> { userId, type, at }
+const PUBLIC_URL = (process.env.PUBLIC_URL || 'https://relish-blasphemy-atop.ngrok-free.dev').replace(/\/+$/, '');
+const DOC_PENDING_TTL = 15 * 60000;
+
+const DOC_TYPES = {
+  contract: { save: ['บันทึกสัญญา', 'เก็บสัญญา'],         ask: ['ขอสัญญา', 'ดูสัญญา'],         label: 'สัญญาเช่า' },
+  movein:   { save: ['บันทึกรูปก่อนเข้า', 'เก็บรูปก่อนเข้า'], ask: ['ขอรูปก่อนเข้า', 'ดูรูปก่อนเข้า'], label: 'รูปห้องก่อนเข้า' },
+  moveout:  { save: ['บันทึกรูปตอนออก', 'เก็บรูปตอนออก'],   ask: ['ขอรูปตอนออก', 'ดูรูปตอนออก'],   label: 'รูปห้องตอนออก' },
+};
+
+function loadDocs() {
+  try {
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    if (fs.existsSync(DOCS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DOCS_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(data)) docs.set(k, v);
+      console.log(`   โหลดเอกสาร ${docs.size} กลุ่มจากไฟล์`);
+    }
+  } catch (e) { console.error('โหลดเอกสารไม่สำเร็จ:', e.message); }
+}
+function saveDocs() {
+  try { fs.writeFileSync(DOCS_FILE, JSON.stringify(Object.fromEntries(docs)), 'utf8'); }
+  catch (e) { console.error('บันทึกเอกสารไม่สำเร็จ:', e.message); }
+}
+async function downloadLineContent(messageId) {
+  const url = `https://api-data.line.me/v2/bot/message/${messageId}/content`;
+  const resp = await axios.get(url, {
+    headers: { Authorization: `Bearer ${config.channelAccessToken}` },
+    responseType: 'arraybuffer', timeout: 60000,
+  });
+  return { buffer: Buffer.from(resp.data), contentType: resp.headers['content-type'] || '' };
+}
+async function saveDocFromMessage(groupId, type, messageId) {
+  const { buffer, contentType } = await downloadLineContent(messageId);
+  const ext = /png/.test(contentType) ? 'png' : /pdf/.test(contentType) ? 'pdf'
+    : /jpe?g/.test(contentType) ? 'jpg' : 'bin';
+  const dir = path.join(MEDIA_DIR, groupId);
+  fs.mkdirSync(dir, { recursive: true });
+  const rand = Math.random().toString(36).slice(2, 8);
+  const fname = `${type}-${Date.now()}-${rand}.${ext}`;
+  fs.writeFileSync(path.join(dir, fname), buffer);
+  const entry = { file: `${groupId}/${fname}`, kind: (ext === 'pdf' || ext === 'bin') ? 'file' : 'image', addedAt: Date.now() };
+  const d = docs.get(groupId) || {};
+  (d[type] = d[type] || []).push(entry);
+  docs.set(groupId, d); saveDocs();
+  return entry;
+}
+async function sendDocs(replyToken, groupId, type) {
+  const cfg = DOC_TYPES[type];
+  const list = (docs.get(groupId) || {})[type] || [];
+  if (!list.length) {
+    return client.replyMessage({ replyToken, messages: [{ type: 'text', text: `ยังไม่มี${cfg.label}ในระบบของกลุ่มนี้ค่ะ` }] });
+  }
+  const recent = list.slice(-4); // LINE: ตอบได้สูงสุด 5 ข้อความ/ครั้ง
+  const head = `${cfg.label} (${list.length} รายการ${list.length > recent.length ? ', แสดง ' + recent.length + ' ล่าสุด' : ''})`;
+  const msgs = [{ type: 'text', text: head }];
+  for (const e of recent) {
+    const url = `${PUBLIC_URL}/media/${e.file}`;
+    if (e.kind === 'image') msgs.push({ type: 'image', originalContentUrl: url, previewImageUrl: url });
+    else msgs.push({ type: 'text', text: `📎 ${cfg.label}: ${url}` });
+  }
+  return client.replyMessage({ replyToken, messages: msgs });
+}
+// คืน true ถ้าจัดการแล้ว (ตอบกลับไปแล้ว)
+async function handleDocCommand(text, groupId, userId, event) {
+  const t = text.trim();
+  const say = (msg) => client.replyMessage({ replyToken: event.replyToken, messages: [{ type: 'text', text: msg }] });
+  // บันทึก (เฉพาะแอดมิน ในกลุ่ม)
+  for (const [type, cfg] of Object.entries(DOC_TYPES)) {
+    if (cfg.save.includes(t)) {
+      if (!groupId) { await say('คำสั่งนี้ใช้ในกลุ่มของห้องนะคะ'); return true; }
+      if (!isAdmin(userId)) return false;
+      pendingDoc.set(groupId, { userId, type, at: Date.now() });
+      await say(`ส่ง${cfg.label} (รูปหรือไฟล์) ต่อได้เลยค่ะ น้องลัคกี้จะเก็บไว้ให้ 📎\nส่งได้หลายรูป — พิมพ์ "ลัคกี้ เลิกบันทึก" เมื่อเสร็จ`);
+      return true;
+    }
+  }
+  if (/^เลิกบันทึก$/.test(t)) {
+    if (groupId && pendingDoc.get(groupId)?.userId === userId) { pendingDoc.delete(groupId); await say('หยุดบันทึกเอกสารแล้วค่ะ'); return true; }
+    return false;
+  }
+  // ขอดู (ทุกคนในกลุ่ม)
+  for (const [type, cfg] of Object.entries(DOC_TYPES)) {
+    if (cfg.ask.includes(t)) {
+      if (!groupId) { await say('ขอดูเอกสารได้ในกลุ่มของห้องนะคะ'); return true; }
+      await sendDocs(event.replyToken, groupId, type);
+      return true;
+    }
+  }
+  return false;
+}
+
 // ─── Reminder Command Handler ──────────────────────────────
 function handleReminderCommand(text, chatId) {
   const t = text.trim();
@@ -663,7 +759,7 @@ async function handleAdminCommand(text, chatId, userId, groupId) {
 
   // ─ คำสั่งแอดมิน
   if (/^(คำสั่งแอดมิน|admin)$/i.test(t)) {
-    return { text: `📋 คำสั่งแอดมิน\n\n🏠 ข้อมูลห้อง (พิมพ์ในกลุ่มของห้องนั้น):\n• ตั้งข้อมูลห้อง  (ดูวิธีตั้งทั้งหมด)\n• ดูข้อมูลห้อง\n\n👥 ผู้เช่า:\n• ดูผู้เช่า\n• เพิ่มผู้เช่า ห้อง 301 ชื่อ สมชาย\n• ลบผู้เช่า ห้อง 301\n\n🔧 แจ้งซ่อม:\n• ดูแจ้งซ่อม\n• ดูแจ้งซ่อม ห้อง 301\n• อัปเดตซ่อม #3 เสร็จแล้ว\n• อัปเดตซ่อม #3 กำลังดำเนินการ\n• อัปเดตซ่อม #3 ยกเลิก\n\n💰 การชำระ:\n• ดูยอดชำระ\n• ดูยอดชำระ เดือน 6\n• ยืนยันชำระ 301\n\n📢 ประกาศ:\n• ประกาศ [ข้อความ]` };
+    return { text: `📋 คำสั่งแอดมิน\n\n🏠 ข้อมูลห้อง (พิมพ์ในกลุ่มของห้องนั้น):\n• ตั้งข้อมูลห้อง  (ดูวิธีตั้งทั้งหมด)\n• ดูข้อมูลห้อง\n\n📁 เอกสาร (ในกลุ่มของห้อง):\n• บันทึกสัญญา / บันทึกรูปก่อนเข้า / บันทึกรูปตอนออก แล้วส่งไฟล์\n• ขอสัญญา / ขอรูปก่อนเข้า / ขอรูปตอนออก\n\n👥 ผู้เช่า:\n• ดูผู้เช่า\n• เพิ่มผู้เช่า ห้อง 301 ชื่อ สมชาย\n• ลบผู้เช่า ห้อง 301\n\n🔧 แจ้งซ่อม:\n• ดูแจ้งซ่อม\n• ดูแจ้งซ่อม ห้อง 301\n• อัปเดตซ่อม #3 เสร็จแล้ว\n• อัปเดตซ่อม #3 กำลังดำเนินการ\n• อัปเดตซ่อม #3 ยกเลิก\n\n💰 การชำระ:\n• ดูยอดชำระ\n• ดูยอดชำระ เดือน 6\n• ยืนยันชำระ 301\n\n📢 ประกาศ:\n• ประกาศ [ข้อความ]` };
   }
 
   return null;
@@ -902,6 +998,7 @@ async function askAI(chatId, userText) {
 // ─── Express ───────────────────────────────────────────────
 const app = express();
 app.get('/', (_req, res) => res.send('LuckyCondo Bot is running ✅'));
+app.use('/media', express.static(MEDIA_DIR));
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try { await Promise.all(req.body.events.map(handleEvent)); res.status(200).end(); }
   catch (err) { console.error('Webhook error:', err); res.status(500).end(); }
@@ -937,6 +1034,20 @@ async function handleEvent(event) {
   // ─ non-text: รูปจากผู้เช่าที่ลงทะเบียนแล้ว = สลิป
   if (event.message.type !== 'text') {
     if (groupId) {
+      // กำลังบันทึกเอกสาร (สัญญา/รูปก่อนเข้า/รูปตอนออก) จากแอดมิน
+      const pend = pendingDoc.get(groupId);
+      if (pend && pend.userId === userId && (Date.now() - pend.at < DOC_PENDING_TTL)
+          && (event.message.type === 'image' || event.message.type === 'file')) {
+        try {
+          await saveDocFromMessage(groupId, pend.type, event.message.id);
+          pend.at = Date.now();
+          const cnt = (docs.get(groupId)[pend.type] || []).length;
+          return client.replyMessage({ replyToken: event.replyToken, messages: [{ type: 'text', text: `✅ บันทึก${DOC_TYPES[pend.type].label}แล้วค่ะ (รวม ${cnt} รายการ)\nส่งเพิ่มได้ หรือพิมพ์ "ลัคกี้ เลิกบันทึก" เมื่อเสร็จ` }] });
+        } catch (e) {
+          console.error('saveDoc error:', e.message);
+          return client.replyMessage({ replyToken: event.replyToken, messages: [{ type: 'text', text: 'ขออภัยค่ะ บันทึกไฟล์ไม่สำเร็จ ลองส่งใหม่อีกครั้งนะคะ' }] });
+        }
+      }
       if (event.message.type === 'image' && userId) {
         const room = getRoomByUser(userId);
         if (room) {
@@ -985,6 +1096,9 @@ async function handleEvent(event) {
     return client.replyMessage({ replyToken: event.replyToken, messages: [msg] });
   };
 
+  // 0. Document commands (บันทึก/ขอดู เอกสาร) — ตอบเองได้ (ส่งรูป)
+  if (await handleDocCommand(promptText, groupId, userId, event)) return;
+
   // 1. Reminder commands
   const reminderReply = handleReminderCommand(promptText, convKey);
   if (reminderReply !== null) return reply(reminderReply);
@@ -1006,11 +1120,11 @@ async function handleEvent(event) {
 }
 
 // ─── Shutdown ──────────────────────────────────────────────
-process.on('SIGINT',  () => { saveConversations(); saveGroups(); saveReminders(); saveTenants(); saveUnits(); saveRooms(); saveRepairs(); savePayments(); process.exit(0); });
-process.on('SIGTERM', () => { saveConversations(); saveGroups(); saveReminders(); saveTenants(); saveUnits(); saveRooms(); saveRepairs(); savePayments(); process.exit(0); });
+process.on('SIGINT',  () => { saveConversations(); saveGroups(); saveReminders(); saveTenants(); saveUnits(); saveRooms(); saveRepairs(); savePayments(); saveDocs(); process.exit(0); });
+process.on('SIGTERM', () => { saveConversations(); saveGroups(); saveReminders(); saveTenants(); saveUnits(); saveRooms(); saveRepairs(); savePayments(); saveDocs(); process.exit(0); });
 
 // ─── Start ─────────────────────────────────────────────────
-loadConversations(); loadGroups(); loadReminders(); loadTenants(); loadUnits(); loadRooms(); loadRepairs(); loadPayments();
+loadConversations(); loadGroups(); loadReminders(); loadTenants(); loadUnits(); loadRooms(); loadRepairs(); loadPayments(); loadDocs();
 app.listen(PORT, () => {
   const r = RENT_REMINDER;
   const hh = String(r.hour).padStart(2, '0'), mm = String(r.minute).padStart(2, '0');
