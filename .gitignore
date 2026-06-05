@@ -4,3 +4,8 @@ node_modules/
 conversations.json
 groups.json
 reminders.json
+tenants.json
+units.json
+rooms.json
+repairs.json
+payments.json
