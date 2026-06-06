@@ -136,6 +136,7 @@ const sameMinute = (a, b) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate() && a.getHours() === b.getHours() && a.getMinutes() === b.getMinutes();
 const firedKeys = new Set();
+let lastExpiryScan = '';
 async function pushReminder(chatId, cfg, daysBefore) {
   try {
     await client.pushMessage({ to: chatId, messages: [{ type: 'text', text: buildReminderText(cfg, daysBefore) }] });
@@ -161,6 +162,14 @@ setInterval(() => {
   }
   const old = Date.now() - 2 * 86400000;
   for (const k of firedKeys) if (Number(k.split('|')[1]) < old) firedKeys.delete(k);
+
+  // เตือนสัญญาใกล้หมด — สแกนวันละครั้งช่วง 09:xx (เวลาไทย)
+  const thai = new Date(Date.now() + 7 * 3600000);
+  const dayKey = `${thai.getUTCFullYear()}-${thai.getUTCMonth() + 1}-${thai.getUTCDate()}`;
+  if (thai.getUTCHours() === 9 && lastExpiryScan !== dayKey) {
+    lastExpiryScan = dayKey;
+    checkContractExpiry();
+  }
 }, 60000);
 
 // ─── Tenant Registry ───────────────────────────────────────
@@ -239,7 +248,9 @@ function saveUnits() {
 function getUnit(groupId) { return units.get(groupId) || null; }
 function updateUnit(groupId, patch) {
   const u = units.get(groupId) || { createdAt: Date.now() };
+  const contractChanged = 'contractEnd' in patch && patch.contractEnd !== u.contractEnd;
   Object.assign(u, patch, { updatedAt: Date.now() });
+  if (contractChanged) u.expiryNotified = []; // เริ่มนับเตือนสัญญาใหม่
   units.set(groupId, u); saveUnits();
   return u;
 }
@@ -430,27 +441,89 @@ function getPaymentMonth(key) {
   if (!payments.has(key)) payments.set(key, {});
   return payments.get(key);
 }
-function recordPayment(room, note, confirmedBy = null) {
+// ชำระเงินยึดตามกลุ่ม (1 กลุ่ม = 1 ยูนิต): unitKey = groupId
+function recordPayment(unitKey, note, confirmedBy = null) {
   const key = currentMonthKey();
   const month = getPaymentMonth(key);
-  month[room.toUpperCase()] = { paid: true, paidAt: Date.now(), note: note || '', confirmedBy };
+  month[unitKey] = { paid: true, paidAt: Date.now(), note: note || '', confirmedBy };
   payments.set(key, month); savePayments();
 }
-function formatPaymentSummary(key) {
-  const month = payments.get(key) || {};
-  const label = thaiMonthLabel(key);
-  const allRooms = allRoomNumbers();
-  if (allRooms.length === 0) return `📊 สรุปการชำระเงิน ${label}\nยังไม่มีห้อง/ผู้เช่าค่ะ`;
-  const paid = allRooms.filter(r => month[r]?.paid);
-  const unpaid = allRooms.filter(r => !month[r]?.paid);
-  const paidRows = paid.map(r => `  ✅ ห้อง ${r}${month[r].confirmedBy ? ' (ยืนยันแล้ว)' : ' (รอยืนยัน)'}`).join('\n');
-  const unpaidRows = unpaid.map(r => {
-    const rent = getRoomRent(r);
-    return `  ❌ ห้อง ${r}${rent ? ' — ' + rent.toLocaleString('th-TH') + ' บาท' : ''}`;
+function paymentStatusOf(groupId, key) {
+  const p = (payments.get(key) || {})[groupId];
+  if (!p?.paid) return 'unpaid';
+  return p.confirmedBy ? 'confirmed' : 'pending';
+}
+function unitLabel(u) { return [u.room, u.tenantName].filter(Boolean).join(' ') || '(ยังไม่ตั้งข้อมูลห้อง)'; }
+
+// ─── Agent Dashboard (รวมทุกยูนิต — ใช้ในแชตเดี่ยวของ agent) ─
+function formatDashboard(key) {
+  const list = [...units.entries()];
+  if (!list.length) return 'ยังไม่มีห้องในระบบค่ะ\nไปที่กลุ่มของแต่ละห้องแล้วพิมพ์ "ลัคกี้ ตั้งข้อมูลห้อง" ก่อนนะคะ';
+  list.sort((a, b) => String(a[1].room || '').localeCompare(String(b[1].room || ''), 'th'));
+  let confirmed = 0, pending = 0, unpaid = 0, outstanding = 0;
+  const rows = list.map(([gid, u]) => {
+    const st = paymentStatusOf(gid, key);
+    if (st === 'confirmed') { confirmed++; return `✅ ${unitLabel(u)}`; }
+    if (st === 'pending') { pending++; return `🕐 ${unitLabel(u)} (รอยืนยัน)`; }
+    unpaid++; outstanding += (u.rent || 0);
+    return `❌ ${unitLabel(u)}${u.rent ? ' — ' + u.rent.toLocaleString('th-TH') + ' บาท' : ''}`;
   }).join('\n');
-  const outstanding = unpaid.reduce((s, r) => s + getRoomRent(r), 0);
-  const outLine = outstanding ? `\n\n💰 ยอดค้างรวม: ${outstanding.toLocaleString('th-TH')} บาท` : '';
-  return `📊 สรุปการชำระเงิน ${label}\n\nชำระแล้ว (${paid.length}/${allRooms.length}):\n${paidRows || '  ยังไม่มี'}\n\nยังไม่ชำระ (${unpaid.length}):\n${unpaidRows || '  ไม่มี'}${outLine}`;
+  return `📊 สรุปการชำระ ${thaiMonthLabel(key)} (${list.length} ห้อง)\n\n${rows}\n\n`
+    + `✅ ยืนยัน ${confirmed} · 🕐 รอยืนยัน ${pending} · ❌ ค้าง ${unpaid}\n`
+    + `💰 ยอดค้างรวม: ${outstanding.toLocaleString('th-TH')} บาท`;
+}
+function formatOverdue(key) {
+  const list = [...units.entries()].filter(([gid]) => paymentStatusOf(gid, key) === 'unpaid');
+  if (!list.length) return `🎉 เดือน ${thaiMonthLabel(key)} ไม่มีห้องค้างชำระค่ะ`;
+  let sum = 0;
+  const rows = list.map(([, u]) => { sum += (u.rent || 0); return `❌ ${unitLabel(u)}${u.rent ? ' — ' + u.rent.toLocaleString('th-TH') + ' บาท' : ''}`; }).join('\n');
+  return `🔴 ห้องค้างชำระ ${thaiMonthLabel(key)} (${list.length} ห้อง)\n\n${rows}\n\n💰 รวม: ${sum.toLocaleString('th-TH')} บาท`;
+}
+function formatOpenRepairs() {
+  const open = repairs.filter(r => r.status !== 'done' && r.status !== 'cancel');
+  if (!open.length) return '🎉 ไม่มีงานแจ้งซ่อมค้างค่ะ';
+  return `🔧 งานซ่อมที่ค้างอยู่ (${open.length})\n\n` + open.map(r => {
+    const u = units.get(r.chatId);
+    const head = u ? unitLabel(u) : `ห้อง ${r.room}`;
+    return `#${r.id} ${head} — ${r.description}\n   ${REPAIR_STATUS[r.status] || r.status}`;
+  }).join('\n\n');
+}
+function formatExpiringContracts(days = 60) {
+  const soon = [];
+  for (const [, u] of units) {
+    if (!u.contractEnd) continue;
+    const left = daysUntil(u.contractEnd);
+    if (left !== null && left <= days) soon.push([u, left]);
+  }
+  if (!soon.length) return `ไม่มีสัญญาที่จะหมดภายใน ${days} วันค่ะ`;
+  soon.sort((a, b) => a[1] - b[1]);
+  return `⏰ สัญญาใกล้หมด (ภายใน ${days} วัน)\n\n` + soon.map(([u, left]) => {
+    const when = left < 0 ? `หมดแล้ว ${Math.abs(left)} วัน` : `อีก ${left} วัน`;
+    return `• ${unitLabel(u)} — ${formatThaiDate(u.contractEnd)} (${when})`;
+  }).join('\n');
+}
+
+// เตือนสัญญาใกล้หมดอัตโนมัติ (push หาแอดมิน) — สแกนวันละครั้ง
+const EXPIRY_THRESHOLDS = [60, 30, 7];
+async function checkContractExpiry() {
+  for (const [, u] of units) {
+    if (!u.contractEnd) continue;
+    const left = daysUntil(u.contractEnd);
+    if (left === null) continue;
+    const done = u.expiryNotified || [];
+    const applicable = EXPIRY_THRESHOLDS.filter(th => left <= th).sort((a, b) => a - b);
+    const target = applicable.find(th => !done.includes(th));
+    if (target === undefined) continue;
+    for (const th of applicable) if (!done.includes(th)) done.push(th);
+    u.expiryNotified = done; saveUnits();
+    const when = left < 0 ? `หมดอายุแล้ว ${Math.abs(left)} วัน` : `เหลืออีก ${left} วัน`;
+    const msg = `⏰ แจ้งเตือนสัญญาใกล้หมด\nห้อง ${unitLabel(u)}\nสัญญาหมด ${formatThaiDate(u.contractEnd)} (${when})\nควรติดต่อผู้เช่าเพื่อต่อสัญญา/วางแผนล่วงหน้านะคะ`;
+    for (const adminId of ADMIN_IDS) {
+      try { await client.pushMessage({ to: adminId, messages: [{ type: 'text', text: msg }] }); }
+      catch (e) { console.error('ส่งเตือนสัญญาไม่สำเร็จ:', e.message); }
+    }
+    console.log(`   ⏰ เตือนสัญญาใกล้หมด: ${unitLabel(u)} (${left} วัน)`);
+  }
 }
 
 // ─── Documents (เอกสาร/รูปต่อกลุ่ม) ─────────────────────────
@@ -700,36 +773,34 @@ async function handleAdminCommand(text, chatId, userId, groupId) {
     return { text: `✅ อัปเดตรายการ #${id} เป็น "${REPAIR_STATUS[newStatus]}" แล้วค่ะ` };
   }
 
-  // ─ ดูยอดชำระ / ดูยอดชำระ เดือน 6
-  if (/^ดูยอดชำระ/.test(t)) {
+  // ─ แดชบอร์ดรวมทุกยูนิต (เหมาะกับแชตเดี่ยวของ agent)
+  if (/^(สรุป(เดือนนี้)?|ดูยอดชำระ)/.test(t)) {
     let key = currentMonthKey();
     const mMonth = t.match(/เดือน\s*(\d{1,2})/);
     if (mMonth) {
       const now = new Date(Date.now() + 7 * 3600000);
       key = `${now.getUTCFullYear()}-${String(parseInt(mMonth[1], 10)).padStart(2, '0')}`;
     }
-    return { text: formatPaymentSummary(key) };
+    return { text: formatDashboard(key) };
+  }
+  if (/^(ค้างชำระ|ห้องค้างชำระ)/.test(t)) return { text: formatOverdue(currentMonthKey()) };
+  if (/^(ซ่อมค้าง|งานซ่อมค้าง|ดูซ่อมค้าง)/.test(t)) return { text: formatOpenRepairs() };
+  if (/^สัญญาใกล้หมด/.test(t)) return { text: formatExpiringContracts(60) };
+  if (/^ทดสอบเตือนสัญญา$/.test(t)) {
+    await checkContractExpiry();
+    return { text: 'รันสแกนสัญญาใกล้หมดแล้วค่ะ (ถ้ามีห้องเข้าเกณฑ์ 60/30/7 วัน จะ push เตือนแอดมิน)\n\n' + formatExpiringContracts(90) };
   }
 
-  // ─ ยืนยันชำระ 301
-  m = t.match(/^ยืนยันชำระ\s+(\S+)/);
-  if (m) {
-    const room = m[1].toUpperCase();
+  // ─ ยืนยันชำระ (พิมพ์ในกลุ่มของห้องนั้น)
+  if (/^ยืนยันชำระ/.test(t)) {
+    if (!groupId) return { text: 'พิมพ์ "ยืนยันชำระ" ในกลุ่มของห้องนั้นนะคะ' };
     const key = currentMonthKey();
     const month = getPaymentMonth(key);
-    if (!month[room]?.paid) return { text: `ห้อง ${room} ยังไม่ได้แจ้งชำระนะคะ` };
-    month[room].confirmedBy = userId; month[room].confirmedAt = Date.now();
+    if (!month[groupId]?.paid) return { text: 'ห้องนี้ยังไม่ได้แจ้งชำระเดือนนี้ค่ะ' };
+    month[groupId].confirmedBy = userId; month[groupId].confirmedAt = Date.now();
     payments.set(key, month); savePayments();
-    const tenant = getUserByRoom(room);
-    if (tenant && !tenant.userId.startsWith('__room_')) {
-      try {
-        await client.pushMessage({
-          to: tenant.userId,
-          messages: [{ type: 'text', text: `✅ ยืนยันการชำระค่าเช่าห้อง ${room} เดือน ${thaiMonthLabel(key)} เรียบร้อยแล้วค่ะ ขอบคุณนะคะ 🙏` }],
-        });
-      } catch {}
-    }
-    return { text: `✅ ยืนยันการชำระห้อง ${room} แล้วค่ะ` };
+    const u = getUnit(groupId);
+    return { text: `✅ ยืนยันการชำระห้อง ${u?.room || ''} เดือน ${thaiMonthLabel(key)} เรียบร้อยแล้วค่ะ ขอบคุณนะคะ 🙏` };
   }
 
   // ─ ประกาศ [ข้อความ]
@@ -759,7 +830,7 @@ async function handleAdminCommand(text, chatId, userId, groupId) {
 
   // ─ คำสั่งแอดมิน
   if (/^(คำสั่งแอดมิน|admin)$/i.test(t)) {
-    return { text: `📋 คำสั่งแอดมิน\n\n🏠 ข้อมูลห้อง (พิมพ์ในกลุ่มของห้องนั้น):\n• ตั้งข้อมูลห้อง  (ดูวิธีตั้งทั้งหมด)\n• ดูข้อมูลห้อง\n\n📁 เอกสาร (ในกลุ่มของห้อง):\n• บันทึกสัญญา / บันทึกรูปก่อนเข้า / บันทึกรูปตอนออก แล้วส่งไฟล์\n• ขอสัญญา / ขอรูปก่อนเข้า / ขอรูปตอนออก\n\n👥 ผู้เช่า:\n• ดูผู้เช่า\n• เพิ่มผู้เช่า ห้อง 301 ชื่อ สมชาย\n• ลบผู้เช่า ห้อง 301\n\n🔧 แจ้งซ่อม:\n• ดูแจ้งซ่อม\n• ดูแจ้งซ่อม ห้อง 301\n• อัปเดตซ่อม #3 เสร็จแล้ว\n• อัปเดตซ่อม #3 กำลังดำเนินการ\n• อัปเดตซ่อม #3 ยกเลิก\n\n💰 การชำระ:\n• ดูยอดชำระ\n• ดูยอดชำระ เดือน 6\n• ยืนยันชำระ 301\n\n📢 ประกาศ:\n• ประกาศ [ข้อความ]` };
+    return { text: `📋 คำสั่งแอดมิน\n\n🏠 ข้อมูลห้อง (พิมพ์ในกลุ่มของห้องนั้น):\n• ตั้งข้อมูลห้อง  (ดูวิธีตั้งทั้งหมด)\n• ดูข้อมูลห้อง\n\n📁 เอกสาร (ในกลุ่มของห้อง):\n• บันทึกสัญญา / บันทึกรูปก่อนเข้า / บันทึกรูปตอนออก แล้วส่งไฟล์\n• ขอสัญญา / ขอรูปก่อนเข้า / ขอรูปตอนออก\n\n👥 ผู้เช่า:\n• ดูผู้เช่า\n• เพิ่มผู้เช่า ห้อง 301 ชื่อ สมชาย\n• ลบผู้เช่า ห้อง 301\n\n🔧 แจ้งซ่อม:\n• ดูแจ้งซ่อม\n• ดูแจ้งซ่อม ห้อง 301\n• อัปเดตซ่อม #3 เสร็จแล้ว\n• อัปเดตซ่อม #3 กำลังดำเนินการ\n• อัปเดตซ่อม #3 ยกเลิก\n\n📊 แดชบอร์ด (พิมพ์ในแชตเดี่ยวกับน้องลัคกี้):\n• สรุปเดือนนี้  (รวมทุกห้อง)\n• ค้างชำระ\n• ซ่อมค้าง\n• สัญญาใกล้หมด\n\n💰 การชำระ:\n• ยืนยันชำระ  (พิมพ์ในกลุ่มของห้อง)\n\n📢 ประกาศ:\n• ประกาศ [ข้อความ]` };
   }
 
   return null;
@@ -810,38 +881,37 @@ function handleTenantCommand(text, chatId, userId) {
   // แจ้งซ่อม [รายละเอียด]
   m = t.match(/^แจ้งซ่อม\s+(.+)/s);
   if (m) {
-    const room = getRoomByUser(userId);
-    if (!room) return 'กรุณาลงทะเบียนก่อนนะคะ พิมพ์ "ลงทะเบียน ห้อง [เลขห้อง] ชื่อ [ชื่อ]"';
+    if (String(chatId).startsWith('U')) return 'แจ้งซ่อมได้ในกลุ่มของห้องนะคะ';
+    const room = getUnit(chatId)?.room || getRoomByUser(userId) || '';
     const repair = addRepair(userId, room, m[1].trim(), chatId);
     return `✅ รับเรื่องแจ้งซ่อม #${repair.id} แล้วค่ะ\nห้อง ${room}: ${repair.description}\nทีมงานจะดำเนินการโดยเร็วนะคะ 🙏`;
   }
 
   // ดูการแจ้งซ่อม
   if (/^ดูการแจ้งซ่อม/.test(t)) {
-    const room = getRoomByUser(userId);
-    if (!room) return 'กรุณาลงทะเบียนก่อนนะคะ';
-    const list = getRepairsByRoom(room);
-    return formatRepairList(list, `🔧 รายการแจ้งซ่อมห้อง ${room}`);
+    if (String(chatId).startsWith('U')) return 'ดูการแจ้งซ่อมได้ในกลุ่มของห้องนะคะ';
+    const list = repairs.filter(r => r.chatId === chatId && r.status !== 'cancel');
+    const u = getUnit(chatId);
+    return formatRepairList(list, `🔧 รายการแจ้งซ่อมห้อง ${u?.room || ''}`);
   }
 
   // แจ้งชำระแล้ว [หมายเหตุ]
   m = t.match(/^แจ้งชำระ(?:แล้ว)?(?:\s+(.+))?/s);
   if (m) {
-    const room = getRoomByUser(userId);
-    if (!room) return 'กรุณาลงทะเบียนก่อนนะคะ';
-    recordPayment(room, (m[1] || '').trim());
-    return `✅ รับทราบการแจ้งชำระห้อง ${room} เดือน ${thaiMonthLabel(currentMonthKey())} แล้วค่ะ\nรอเจ้าหน้าที่ยืนยันนะคะ 🙏`;
+    if (String(chatId).startsWith('U')) return 'แจ้งชำระได้ในกลุ่มของห้องนะคะ';
+    recordPayment(chatId, (m[1] || '').trim());
+    const u = getUnit(chatId);
+    return `✅ รับแจ้งชำระห้อง ${u?.room || ''} เดือน ${thaiMonthLabel(currentMonthKey())} แล้วค่ะ\nรอเจ้าหน้าที่ยืนยันนะคะ 🙏`;
   }
 
   // ดูสถานะชำระ
   if (/^ดูสถานะชำระ/.test(t)) {
-    const room = getRoomByUser(userId);
-    if (!room) return 'กรุณาลงทะเบียนก่อนนะคะ';
+    if (String(chatId).startsWith('U')) return 'ดูสถานะชำระได้ในกลุ่มของห้องนะคะ';
     const key = currentMonthKey();
-    const month = payments.get(key) || {};
-    const p = month[room];
-    if (!p?.paid) return `❌ ห้อง ${room} ยังไม่ได้แจ้งชำระค่าเช่าเดือน ${thaiMonthLabel(key)} ค่ะ`;
-    return `💰 ห้อง ${room} เดือน ${thaiMonthLabel(key)}\nสถานะ: ${p.confirmedBy ? '✅ ยืนยันแล้ว' : '🕐 รอการยืนยันจากเจ้าหน้าที่'}`;
+    const p = (payments.get(key) || {})[chatId];
+    const u = getUnit(chatId);
+    if (!p?.paid) return `❌ ห้อง ${u?.room || ''} ยังไม่ได้แจ้งชำระค่าเช่าเดือน ${thaiMonthLabel(key)} ค่ะ`;
+    return `💰 ห้อง ${u?.room || ''} เดือน ${thaiMonthLabel(key)}\nสถานะ: ${p.confirmedBy ? '✅ ยืนยันแล้ว' : '🕐 รอการยืนยันจากเจ้าหน้าที่'}`;
   }
 
   return null;
@@ -1048,15 +1118,13 @@ async function handleEvent(event) {
           return client.replyMessage({ replyToken: event.replyToken, messages: [{ type: 'text', text: 'ขออภัยค่ะ บันทึกไฟล์ไม่สำเร็จ ลองส่งใหม่อีกครั้งนะคะ' }] });
         }
       }
-      if (event.message.type === 'image' && userId) {
-        const room = getRoomByUser(userId);
-        if (room) {
-          recordPayment(room, '(ส่งรูปสลิป)');
-          return client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: 'text', text: `🧾 รับสลิปของห้อง ${room} แล้วค่ะ รอเจ้าหน้าที่ยืนยันนะคะ 🙏` }],
-          });
-        }
+      if (event.message.type === 'image' && userId && !isAdmin(userId) && getUnit(groupId)) {
+        recordPayment(groupId, '(ส่งรูปสลิป)');
+        const u = getUnit(groupId);
+        return client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [{ type: 'text', text: `🧾 รับสลิปห้อง ${u?.room || ''} แล้วค่ะ รอเจ้าหน้าที่ยืนยันนะคะ 🙏` }],
+        });
       }
       return null;
     }
