@@ -1,13 +1,34 @@
-﻿# สร้างรูป Rich Menu 2500x1686 (6 ปุ่ม 2x3) สำหรับงานดูแลผู้เช่า
+﻿# สร้างรูป Rich Menu 2500x1686 (6 ปุ่ม 2x3) — สร้างทั้งเมนูผู้เช่าและเมนูแอดมิน
 Add-Type -AssemblyName System.Drawing
-$w = 2500; $h = 1686
-$bmp = New-Object System.Drawing.Bitmap($w, $h)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-$g.FillRectangle([System.Drawing.Brushes]::White, 0, 0, $w, $h)
 
-$cells = @(
+function New-RichMenuImage($cells, $outPath) {
+  $w = 2500; $h = 1686
+  $bmp = New-Object System.Drawing.Bitmap($w, $h)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+  $g.FillRectangle([System.Drawing.Brushes]::White, 0, 0, $w, $h)
+  $font = New-Object System.Drawing.Font("Leelawadee UI", 80, [System.Drawing.FontStyle]::Bold)
+  $fmt = New-Object System.Drawing.StringFormat
+  $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+  $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+  $white = [System.Drawing.Brushes]::White
+  foreach ($c in $cells) {
+    $col = [System.Drawing.ColorTranslator]::FromHtml($c.hex)
+    $br = New-Object System.Drawing.SolidBrush($col)
+    $g.FillRectangle($br, ($c.x + 10), ($c.y + 10), ($c.w - 20), ($c.h - 20))
+    $rect = New-Object System.Drawing.RectangleF($c.x, $c.y, $c.w, $c.h)
+    $g.DrawString($c.t, $font, $white, $rect, $fmt)
+    $br.Dispose()
+  }
+  $g.Dispose()
+  $bmp.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+  $bmp.Dispose()
+  Write-Output "saved: $outPath"
+}
+
+# เมนูผู้เช่า
+$tenant = @(
   @{ x = 0;    y = 0;   w = 833; h = 843; hex = '#00897B'; t = "ข้อมูลห้อง" },
   @{ x = 833;  y = 0;   w = 833; h = 843; hex = '#F4511E'; t = "แจ้งซ่อม" },
   @{ x = 1666; y = 0;   w = 834; h = 843; hex = '#2E7D32'; t = "แจ้งชำระแล้ว" },
@@ -16,23 +37,15 @@ $cells = @(
   @{ x = 1666; y = 843; w = 834; h = 843; hex = '#6A1B9A'; t = "ติดต่อเจ้าหน้าที่" }
 )
 
-$font = New-Object System.Drawing.Font("Leelawadee UI", 80, [System.Drawing.FontStyle]::Bold)
-$fmt = New-Object System.Drawing.StringFormat
-$fmt.Alignment = [System.Drawing.StringAlignment]::Center
-$fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
-$white = [System.Drawing.Brushes]::White
+# เมนูแอดมิน
+$admin = @(
+  @{ x = 0;    y = 0;   w = 833; h = 843; hex = '#00695C'; t = "คำสั่งทั้งหมด" },
+  @{ x = 833;  y = 0;   w = 833; h = 843; hex = '#1565C0'; t = "สรุปเดือนนี้" },
+  @{ x = 1666; y = 0;   w = 834; h = 843; hex = '#2E7D32'; t = "ห้องทั้งหมด" },
+  @{ x = 0;    y = 843; w = 833; h = 843; hex = '#C62828'; t = "ค้างชำระ" },
+  @{ x = 833;  y = 843; w = 833; h = 843; hex = '#EF6C00'; t = "ซ่อมค้าง" },
+  @{ x = 1666; y = 843; w = 834; h = 843; hex = '#6A1B9A'; t = "สัญญาใกล้หมด" }
+)
 
-foreach ($c in $cells) {
-  $col = [System.Drawing.ColorTranslator]::FromHtml($c.hex)
-  $br = New-Object System.Drawing.SolidBrush($col)
-  $g.FillRectangle($br, ($c.x + 10), ($c.y + 10), ($c.w - 20), ($c.h - 20))
-  $rect = New-Object System.Drawing.RectangleF($c.x, $c.y, $c.w, $c.h)
-  $g.DrawString($c.t, $font, $white, $rect, $fmt)
-  $br.Dispose()
-}
-
-$g.Dispose()
-$out = Join-Path $PSScriptRoot 'richmenu.png'
-$bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
-$bmp.Dispose()
-Write-Output "saved: $out"
+New-RichMenuImage $tenant (Join-Path $PSScriptRoot 'richmenu.png')
+New-RichMenuImage $admin  (Join-Path $PSScriptRoot 'richmenu-admin.png')

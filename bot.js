@@ -472,6 +472,23 @@ function formatDashboard(key) {
     + `✅ ยืนยัน ${confirmed} · 🕐 รอยืนยัน ${pending} · ❌ ค้าง ${unpaid}\n`
     + `💰 ยอดค้างรวม: ${outstanding.toLocaleString('th-TH')} บาท`;
 }
+function formatAllUnits() {
+  const list = [...units.entries()];
+  if (!list.length) return 'ยังไม่มีห้องในระบบค่ะ\nไปที่กลุ่มของแต่ละห้องแล้วพิมพ์ "ลัคกี้ ตั้งข้อมูลห้อง" ก่อนนะคะ';
+  list.sort((a, b) => String(a[1].room || '').localeCompare(String(b[1].room || ''), 'th'));
+  const rows = list.map(([, u]) => {
+    const lines = [`🏠 ${unitLabel(u)}`];
+    if (u.rent) lines.push(`ค่าเช่า ${u.rent.toLocaleString('th-TH')} บาท`);
+    if (u.tenantPhone) lines.push(`โทร ${u.tenantPhone}`);
+    if (u.contractEnd) {
+      const left = daysUntil(u.contractEnd);
+      const tail = left === null ? '' : left >= 0 ? ` (เหลือ ${left} วัน)` : ` (หมดแล้ว ${Math.abs(left)} วัน)`;
+      lines.push(`สัญญาถึง ${formatThaiDate(u.contractEnd)}${tail}`);
+    }
+    return lines.join('\n   ');
+  }).join('\n\n');
+  return `🏘️ ห้องที่ดูแลทั้งหมด (${list.length} ห้อง)\n\n${rows}`;
+}
 function formatOverdue(key) {
   const list = [...units.entries()].filter(([gid]) => paymentStatusOf(gid, key) === 'unpaid');
   if (!list.length) return `🎉 เดือน ${thaiMonthLabel(key)} ไม่มีห้องค้างชำระค่ะ`;
@@ -783,6 +800,7 @@ async function handleAdminCommand(text, chatId, userId, groupId) {
     }
     return { text: formatDashboard(key) };
   }
+  if (/^(ดูห้องทั้งหมด|ห้องทั้งหมด)/.test(t)) return { text: formatAllUnits() };
   if (/^(ค้างชำระ|ห้องค้างชำระ)/.test(t)) return { text: formatOverdue(currentMonthKey()) };
   if (/^(ซ่อมค้าง|งานซ่อมค้าง|ดูซ่อมค้าง)/.test(t)) return { text: formatOpenRepairs() };
   if (/^สัญญาใกล้หมด/.test(t)) return { text: formatExpiringContracts(60) };
